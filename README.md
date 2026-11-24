@@ -1,6 +1,6 @@
-# Módulo 5 · Predicción de pago a tiempo, umbral de negocio y monitoreo de drift
+# Módulo 5 · Predicción de pago a tiempo, umbral de negocio 
 
-Proyecto de *machine learning* supervisado para una entidad de crédito. El modelo estima si un cliente **pagará su préstamo a tiempo**, se decide a partir de qué riesgo conviene **rechazar** un crédito usando una métrica de negocio, y se **monitorea** en el tiempo para detectar cambios en la población (*data drift*).
+Proyecto de *machine learning* supervisado para una entidad de crédito. El modelo estima si un cliente **pagará su préstamo a tiempo**, se decide a partir de qué riesgo conviene **rechazar** un crédito usando una métrica de negocio.
 
 ## Caso de negocio
 
