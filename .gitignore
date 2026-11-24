@@ -199,4 +199,9 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+#
+salidas/
+*.joblib
+__pycache__/
+
 # End of https://www.toptal.com/developers/gitignore/api/windows,python
