@@ -1,8 +1,9 @@
-"""Evaluación y comparación de modelos (v1.1.0).
+"""Evaluación y comparación de modelos (v1.1.2).
 
-Genera: tabla resumen, gráficos comparativos train vs test, curvas ROC y
-matriz de confusión del mejor modelo. Todo se calcula a partir de los modelos
-entrenados (nada pegado a mano).
+Genera: tabla resumen, comparación del umbral por defecto vs el ajustado,
+gráficos comparativos train vs test, valor de negocio según el % de rechazo,
+curvas ROC y matriz de confusión del mejor modelo. Todo se calcula a partir de
+los modelos entrenados (nada pegado a mano).
 
 Requiere en esta carpeta (src/): model_training.ipynb, ft_engineering.py y
 cargar_datos.py. La base Base_de_datos.xlsx va en la raíz del proyecto.
@@ -17,6 +18,7 @@ import sys
 import types
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import ConfusionMatrixDisplay, roc_curve
@@ -62,42 +64,106 @@ TITULOS = {
     "f1_score": "F1 (no paga a tiempo)",
     "roc_auc": "ROC AUC",
     "casosNoPagoAtiempo": "Casos predichos como no paga",
+    "valor_negocio": "Valor de negocio (millones)",
+    "pct_valor_capturado": "% del valor máximo capturado",
 }
 
 
-def tabla_resumen(results_df: pd.DataFrame, best: str | None = None) -> pd.DataFrame:
-    """Tabla modelo x métrica (test) con la brecha de recall train - test."""
+def tabla_resumen(results_df: pd.DataFrame, best: str | None = None,
+                  umbrales: dict | None = None) -> pd.DataFrame:
+    """Tabla modelo x métrica (test, con el umbral ajustado).
+
+    Incluye la brecha de recall train - test y, si se entregan, los umbrales.
+    """
+    columnas = model_training.METRICAS + model_training.METRICAS_NEGOCIO
     pv = results_df.pivot_table(index=["Model", "Data Set"], columns="Metric",
-                                values="Score")[model_training.METRICAS]
+                                values="Score")[columnas]
     test = pv.xs("test", level="Data Set").copy()
     train = pv.xs("train", level="Data Set")
     # Brecha grande = el modelo memoriza train y generaliza mal (sobreajuste)
     test["brecha_recall_train_test"] = train["recall"] - test["recall"]
-    test = test.sort_values("recall", ascending=False)
+    # El valor de negocio se muestra en millones para que sea legible
+    test["valor_negocio"] = test["valor_negocio"] / 1e6
+    test = test.rename(columns={"valor_negocio": "valor_negocio_M"})
+    if umbrales is not None:
+        test["umbral"] = [umbrales[m] for m in test.index]
+    test = test.sort_values("valor_negocio_M", ascending=False)
     if best in test.index:  # marca el ganador con una estrella
         test.index = [f"{m} ★" if m == best else m for m in test.index]
     return test.round(3)
 
 
+def tabla_umbral(res: dict) -> pd.DataFrame:
+    """Compara, en test, la decisión por defecto de cada modelo con el umbral ajustado."""
+    filas = []
+    for nombre, r in res["resultados"].items():
+        base, ajust = r["base_test"], r["test"]
+        filas.append({
+            "modelo": nombre,
+            "valor_defecto_M": base["valor_negocio"] / 1e6,
+            "valor_ajustado_M": ajust["valor_negocio"] / 1e6,
+            "recall_defecto": base["recall"],
+            "recall_ajustado": ajust["recall"],
+            "precision_defecto": base["precision"],
+            "precision_ajustada": ajust["precision"],
+            "rechazados_defecto": base["casosNoPagoAtiempo"],
+            "rechazados_ajustado": ajust["casosNoPagoAtiempo"],
+        })
+    return pd.DataFrame(filas).set_index("modelo").round(3)
+
+
 def grafico_comparativo(results_df: pd.DataFrame) -> plt.Figure:
-    """Barras agrupadas train vs test por métrica y modelo."""
-    fig, axes = plt.subplots(3, 2, figsize=(16, 15))
-    for ax, metrica in zip(axes.flatten(), model_training.METRICAS):
-        d = results_df[results_df["Metric"] == metrica]
+    """Barras agrupadas train vs test por métrica y modelo (con el umbral ajustado)."""
+    metricas = model_training.METRICAS + model_training.METRICAS_NEGOCIO
+    fig, axes = plt.subplots(4, 2, figsize=(16, 19))
+    for ax, metrica in zip(axes.flatten(), metricas):
+        d = results_df[results_df["Metric"] == metrica].copy()
+        if metrica == "valor_negocio":
+            d["Score"] = d["Score"] / 1e6  # millones
         sns.barplot(data=d, x="Model", y="Score", hue="Data Set", ax=ax,
                     palette="cividis")
         ax.set_title(TITULOS[metrica], fontsize=14)
         ax.set_xlabel("")
         ax.set_ylabel("Puntuación")
         ax.tick_params(axis="x", rotation=30)
-        # Escalas: el AUC parte de 0,45 para ver mejor las diferencias; el
-        # conteo de casos no tiene tope fijo; el resto va de 0 a 1
+        # Escalas: el AUC parte de 0,45 para ver mejor las diferencias; las
+        # métricas entre 0 y 1 van de 0 a 1; el resto no tiene tope fijo
         if metrica == "roc_auc":
             ax.set_ylim(0.45, 1.05)
-        elif metrica != "casosNoPagoAtiempo":
+        elif metrica in ("accuracy", "precision", "recall", "f1_score"):
             ax.set_ylim(0, 1.05)
-    fig.suptitle("Comparación de modelos: train vs test", fontsize=18)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+        if metrica in model_training.METRICAS_NEGOCIO:
+            ax.axhline(0, color="k", lw=0.8)  # 0 = aprobar a todos
+    fig.suptitle("Comparación de modelos con umbral ajustado: train vs test",
+                 fontsize=18)
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    return fig
+
+
+def grafico_valor_umbral(res: dict) -> plt.Figure:
+    """Valor de negocio (fuera de muestra) según el % de clientes rechazados.
+
+    Cada punto marcado es el umbral elegido para ese modelo. Por encima de 0
+    el modelo mejora a aprobar a todos.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+    for nombre, r in res["resultados"].items():
+        # Solo la zona útil (hasta 6 % de rechazo): más allá el valor se
+        # desploma y aplastaría la escala del gráfico
+        curva = r["curva"][r["curva"]["pct_rechazados"] <= 0.06]
+        linea, = ax.plot(curva["pct_rechazados"] * 100, curva["valor_negocio"] / 1e6,
+                         label=nombre)
+        # Punto del umbral elegido
+        elegido = curva.loc[curva["umbral"] == r["umbral"]].iloc[0]
+        ax.scatter(elegido["pct_rechazados"] * 100, elegido["valor_negocio"] / 1e6,
+                   color=linea.get_color(), zorder=3, s=60, edgecolor="k")
+    ax.axhline(0, color="k", lw=0.8, ls="--")
+    ax.set_xlim(0, 6)
+    ax.set(xlabel="% de clientes rechazados (los más riesgosos)",
+           ylabel="Valor de negocio fuera de muestra (millones)",
+           title="Valor de negocio según el umbral (● = umbral elegido)")
+    ax.legend()
+    fig.tight_layout()
     return fig
 
 
@@ -119,24 +185,31 @@ def grafico_roc(res: dict) -> plt.Figure:
 
 
 def grafico_confusion(res: dict) -> plt.Figure:
-    """Matriz de confusión del mejor modelo en test."""
+    """Matriz de confusión del mejor modelo en test, con su umbral ajustado."""
     best, data = res["best"], res["data"]
+    score = model_training.score_no_pago(res["models"][best], data["X_test"])
+    pred = np.where(score >= res["umbrales"][best], 0, 1)
     fig, ax = plt.subplots(figsize=(5.5, 5))
-    ConfusionMatrixDisplay.from_estimator(
-        res["models"][best], data["X_test"], data["y_test"], ax=ax,
+    ConfusionMatrixDisplay.from_predictions(
+        data["y_test"], pred, ax=ax,
         display_labels=["No paga (0)", "Paga (1)"], cmap="Blues", colorbar=False)
-    ax.set_title(f"Matriz de confusión en test: {best}")
+    ax.set_title(f"Matriz de confusión en test: {best} (umbral ajustado)")
     fig.tight_layout()
     return fig
 
 
 def evaluation(res: dict | None = None, carpeta: str | None = None) -> io.BytesIO:
-    """Corre (o recibe) el entrenamiento, imprime la tabla y devuelve el PNG
+    """Corre (o recibe) el entrenamiento, imprime las tablas y devuelve el PNG
     comparativo en memoria. Si se da `carpeta`, guarda además todos los gráficos
-    y la tabla resumen en CSV."""
+    y las tablas en CSV."""
     res = res or model_training.train_all()
-    tabla = tabla_resumen(res["results_df"], res["best"])
+    tabla = tabla_resumen(res["results_df"], res["best"], res["umbrales"])
+    antes_despues = tabla_umbral(res)
+
+    print("Resumen en test (umbral ajustado):")
     print(tabla.to_string())
+    print("\nUmbral por defecto vs ajustado (test):")
+    print(antes_despues.to_string())
     print(f"\nModelo seleccionado: {res['best']}")
 
     # Gráfico comparativo en memoria (útil, por ejemplo, para devolverlo en una API)
@@ -149,11 +222,13 @@ def evaluation(res: dict | None = None, carpeta: str | None = None) -> io.BytesI
     if carpeta:
         os.makedirs(carpeta, exist_ok=True)
         fig.savefig(f"{carpeta}/comparacion_modelos.png", dpi=110)
-        for nombre, f in (("curvas_roc", grafico_roc(res)),
+        for nombre, f in (("valor_vs_umbral", grafico_valor_umbral(res)),
+                          ("curvas_roc", grafico_roc(res)),
                           ("matriz_confusion", grafico_confusion(res))):
             f.savefig(f"{carpeta}/{nombre}.png", dpi=110)
             plt.close(f)
         tabla.to_csv(f"{carpeta}/tabla_resumen.csv")
+        antes_despues.to_csv(f"{carpeta}/comparacion_umbral.csv")
     plt.close(fig)
     return buf
 
